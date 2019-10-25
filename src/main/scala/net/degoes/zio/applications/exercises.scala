@@ -19,12 +19,20 @@ import java.util.concurrent.ConcurrentHashMap
 
 object sharding extends App {
   /**
-   * Create N workers reading from a Queue, if one of them fails, 
-   * then wait for the other ones to process the current item, but 
+   * Create N workers reading from a Queue, if one of them fails,
+   * then wait for the other ones to process the current item, but
    * terminate all the workers.
    */
-  def shard[R, E, A](queue: Queue[A], n: Int, worker: A => ZIO[R, E, Unit]): ZIO[R, E, Unit] = 
-    ???
+  def shard[R, E, A](queue: Queue[A], n: Int, worker: A => ZIO[R, E, Unit]): ZIO[R, E, Nothing] = {
+    val worker1 = queue.take.flatMap(a => worker(a).uninterruptible).forever
+
+    val fiberEff = ZIO.forkAll(List.fill(n)(worker1))
+
+    (for {
+      fiber <- fiberEff
+      _     <- fiber.join.onError(_ => fiber.interrupt)
+    } yield ()) *> ZIO.never
+  }
 
   def run(args: List[String]) = ???
 }
@@ -43,10 +51,10 @@ object alerting {
   def sendSystemEmail(to: Email, subject: String, body: String): UIO[Unit] = ???
 
   /**
-   * Use STM to alert an engineer when the number of hourly errors exceeds 
+   * Use STM to alert an engineer when the number of hourly errors exceeds
    * 100.
    */
-  def alertEngineer(metrics: Metrics, onDuty: TRef[Engineer]): UIO[Unit] = 
+  def alertEngineer(metrics: Metrics, onDuty: TRef[Engineer]): UIO[Unit] =
     ???
 }
 
@@ -57,7 +65,13 @@ object hangman extends App {
    * `Random` effects.
    */
   lazy val myGame: ZIO[Console with Random, IOException, Unit] =
-    ???
+    for {
+      word  <- chooseWord
+      name  <- getName
+      state = State(name, Set(), word)
+      _     <- renderState(state)
+      _     <- gameLoop(state)
+    } yield ()
 
   final case class State(name: String, guesses: Set[Char], word: String) {
     final def failures: Int = (guesses -- word.toSet).size
@@ -89,7 +103,25 @@ object hangman extends App {
    * Implement the main game loop, which gets choices from the user until
    * the game is won or lost.
    */
-  def gameLoop(state0: State): ZIO[Console, IOException, Unit] = ???
+  def gameLoop(state0: State): ZIO[Console, IOException, Unit] = {
+    def process(state: State, result: GuessResult): ZIO[Console, Nothing, Boolean] =
+      result match {
+        case GuessResult.Unchanged => putStrLn(s"You already guessed that choice, ${state.name}!") as true
+        case GuessResult.Lost      => putStrLn(s"Sorry, ${state.name}, you lost! The word was ${state.word}.") as false
+        case GuessResult.Won       => putStrLn(s"Congratulations, ${state.name}, you won!") as false
+        case GuessResult.Correct   => putStrLn(s"Good job, ${state.name}, you guessed correctly. Keep going!") as true
+        case GuessResult.Incorrect => putStrLn(s"Sorry, ${state.name}, you guessed incorrectly. Try again!") as true
+      }
+
+    for {
+      choice <- getChoice
+      state  <- ZIO.succeed(state0.addChar(choice))
+      _      <- renderState(state)
+      result <- ZIO.succeed(guessResult(state0, state, choice))
+      loop   <- process(state, result)
+      _      <- if (loop) gameLoop(state) else ZIO.unit
+    } yield ()
+  }
 
   def renderState(state: State): ZIO[Console, Nothing, Unit] = {
 
@@ -117,18 +149,28 @@ object hangman extends App {
    * Implement an effect that gets a single, lower-case character from
    * the user.
    */
-  lazy val getChoice: ZIO[Console, IOException, Char] = ???
+  lazy val getChoice: ZIO[Console, Nothing, Char] = for {
+    _ <- putStrLn("Please enter a single character: ")
+    char <- getStrLn.orDie.map(_.trim.toLowerCase.toList).flatMap {
+             case char :: Nil => ZIO.succeed(char)
+             case _           => putStrLn("Bad input!") *> ZIO.fail(())
+           } orElse getChoice
+  } yield char
 
   /**
    * Implement an effect that prompts the user for their name, and
    * returns it.
    */
-  lazy val getName: ZIO[Console, IOException, String] = ???
+  lazy val getName: ZIO[Console, IOException, String] = for {
+    _    <- putStrLn("Please enter your name: ")
+    name <- getStrLn
+  } yield name
 
   /**
    * Implement an effect that chooses a random word from the dictionary.
    */
-  lazy val chooseWord: ZIO[Random, Nothing, String] = ???
+  lazy val chooseWord: ZIO[Random, Nothing, String] =
+    random.nextInt(Dictionary.length).map(Dictionary(_))
 
   val Dictionary = List(
     "aaron",
@@ -1015,7 +1057,12 @@ object hangman extends App {
    * Implement the `runScenario` method according to its type. Hint: You
    * will have to use `provide` on `TestModule`.
    */
-  def runScenario(testData: TestData): IO[IOException, TestData] = ???
+  def runScenario(testData: TestData): IO[IOException, TestData] =
+    for {
+      ref  <- Ref.make(testData)
+      _    <- myGame.provide(TestModule(ref))
+      data <- ref.get
+    } yield data
 
   case class TestData(
     output: List[String],
@@ -1061,6 +1108,7 @@ object hangman extends App {
 
   override def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
     myGame.fold(_ => 1, _ => 0)
+//    testScenario1.fold(_ => 1, _ => 0)
 }
 
 object parallel_web_crawler {
